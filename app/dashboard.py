@@ -2,259 +2,279 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import sqlite3
+import os
+import hashlib
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, roc_curve, confusion_matrix, classification_report
 
-# ---------------- CONFIG ----------------
-st.set_page_config(page_title="MediRisk Portal", layout="wide")
-
-# ---------------- DATABASE ----------------
+# ======================
+# DB
+# ======================
 conn = sqlite3.connect("app.db", check_same_thread=False)
 c = conn.cursor()
 
-c.execute("""
-CREATE TABLE IF NOT EXISTS users(
-    username TEXT PRIMARY KEY,
-    password TEXT
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS predictions(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT,
-    age INT,
-    glucose INT,
-    cholesterol INT,
-    bp INT,
-    probability REAL,
-    result TEXT,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-)
-""")
+c.execute("""CREATE TABLE IF NOT EXISTS users(username TEXT PRIMARY KEY, password TEXT, role TEXT)""")
+c.execute("""CREATE TABLE IF NOT EXISTS history(username TEXT, age INT, bp INT, glucose INT, cholesterol INT, risk TEXT, score REAL)""")
 conn.commit()
 
-# ---------------- LOAD DATA ----------------
-@st.cache_data
-def load_data():
-    df = pd.read_csv("data/realtime_patient_data.csv")
+def hash_pw(p): return hashlib.sha256(p.encode()).hexdigest()
 
-    if "Risk_Level" not in df.columns:
-        df["Risk_Level"] = df["Risk_Score"].apply(lambda x: 1 if x > 50 else 0)
-
-    return df
-
-df = load_data()
-
-# ---------------- MODEL ----------------
-@st.cache_resource
-def train_model(df):
-    X = df[['Age','Systolic_BP','Glucose_Lvl','Cholesterol_Lvl']]
-    y = df['Risk_Level']
-
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-
-    model = RandomForestClassifier()
-    model.fit(X_scaled, y)
-
-    return model, scaler
-
-model, scaler = train_model(df)
-
-# ---------------- SESSION ----------------
-if "user" not in st.session_state:
-    st.session_state.user = None
-
-# ---------------- AUTH ----------------
-def login(u,p):
-    c.execute("SELECT * FROM users WHERE username=? AND password=?", (u,p))
-    return c.fetchone()
-
-def signup(u,p):
+def signup(u,p,r):
     try:
-        c.execute("INSERT INTO users VALUES (?,?)",(u,p))
+        c.execute("INSERT INTO users VALUES (?,?,?)",(u,hash_pw(p),r))
         conn.commit()
         return True
     except:
         return False
 
-# ---------------- SIDEBAR ----------------
-st.sidebar.title("🧑‍⚕️ MediRisk Portal")
+def login(u,p):
+    c.execute("SELECT * FROM users WHERE username=? AND password=?",(u,hash_pw(p)))
+    return c.fetchone()
 
-menu = st.sidebar.selectbox("Menu", ["Login","Signup"])
+def save_hist(u,a,b,g,ch,r,s):
+    c.execute("INSERT INTO history VALUES (?,?,?,?,?,?,?)",(u,a,b,g,ch,r,s))
+    conn.commit()
 
+def get_hist(u):
+    c.execute("SELECT * FROM history WHERE username=?",(u,))
+    return c.fetchall()
+
+def get_all():
+    c.execute("SELECT * FROM history")
+    return c.fetchall()
+
+# ======================
+# DATA
+# ======================
+@st.cache_data
+def load_data():
+    base=os.path.dirname(os.path.abspath(__file__))
+    path=os.path.join(base,"..","data","realtime_patient_data.csv")
+    return pd.read_csv(path)
+
+# ======================
+# ML (cached)
+# ======================
+@st.cache_resource
+def train_models(data):
+
+    X=data[["Age","Systolic_BP","Glucose_Lvl","Cholesterol_Lvl"]]
+    y=(data["Risk_Score"]>50).astype(int)
+
+    Xtr,Xte,ytr,yte=train_test_split(X,y,test_size=0.2,random_state=42)
+
+    models={
+        "Logistic":LogisticRegression(max_iter=1000),
+        "Decision Tree":DecisionTreeClassifier(),
+        "Random Forest":RandomForestClassifier(),
+        "Gradient Boosting":GradientBoostingClassifier()
+    }
+
+    res=[]
+    outputs={}
+
+    for name,m in models.items():
+        m.fit(Xtr,ytr)
+        yp=m.predict(Xte)
+        ypb=m.predict_proba(Xte)[:,1]
+
+        res.append({
+            "Model":name,
+            "Accuracy":accuracy_score(yte,yp),
+            "Precision":precision_score(yte,yp,zero_division=0),
+            "Recall":recall_score(yte,yp,zero_division=0),
+            "F1":f1_score(yte,yp,zero_division=0),
+            "AUC":roc_auc_score(yte,ypb)
+        })
+
+        outputs[name]=(m,Xte,yte,yp,ypb)
+
+    df=pd.DataFrame(res)
+    best_name=df.sort_values("Accuracy",ascending=False)["Model"].iloc[0]
+    best_model=outputs[best_name][0]
+
+    return df,outputs,best_model,best_name
+
+# ======================
+# RISK
+# ======================
+def risk_level(score):
+    if score<40:return "Low"
+    elif score<70:return "Medium"
+    else:return "High"
+
+def suggestions(level):
+    if level=="High":
+        return ["Consult doctor","Reduce sugar","Daily monitoring","Avoid oily food"]
+    elif level=="Medium":
+        return ["Exercise","Balanced diet","Reduce salt"]
+    else:
+        return ["Maintain lifestyle","Stay active"]
+
+# ======================
+# UI
+# ======================
+st.set_page_config(layout="wide")
+st.sidebar.title("🧠 Patient Risk System")
+
+if "user" not in st.session_state:
+    st.session_state.user=None
+    st.session_state.role=None
+
+# LOGIN
+if st.session_state.user is None:
+
+    st.sidebar.subheader("Login / Signup")
+    u=st.sidebar.text_input("Username")
+    p=st.sidebar.text_input("Password",type="password")
+    r=st.sidebar.selectbox("Role",["Patient","Admin"])
+
+    if st.sidebar.button("Signup"):
+        if signup(u,p,r): st.success("Account created")
+        else: st.warning("User exists")
+
+    if st.sidebar.button("Login"):
+        user=login(u,p)
+        if user:
+            st.session_state.user=user[0]
+            st.session_state.role=user[2]
+            st.rerun()
+        else:
+            st.error("Invalid login")
+
+# ======================
+# MAIN
+# ======================
 if st.session_state.user:
-    st.sidebar.success(f"Logged in as {st.session_state.user}")
-    page = st.sidebar.radio("Navigate",
-        ["Patient Diagnostic","Analytics","Model Transparency","History"])
+
+    st.sidebar.success(f"{st.session_state.user} ({st.session_state.role})")
+
+    menu=["Prediction","Model Eval","EDA","History"] if st.session_state.role=="Admin" else ["Prediction","History"]
+    page=st.sidebar.radio("Menu",menu)
 
     if st.sidebar.button("Logout"):
-        st.session_state.user = None
+        st.session_state.user=None
+        st.session_state.role=None
+        st.rerun()
 
-# ---------------- LOGIN ----------------
-if not st.session_state.user:
+    data=load_data()
+    df,outputs,best_model,best_name=train_models(data)
 
-    if menu == "Login":
-        st.title("🔐 Login")
-        u = st.text_input("Username")
-        p = st.text_input("Password", type="password")
+    # ======================
+    # PREDICTION
+    # ======================
+    if page=="Prediction":
 
-        if st.button("Login"):
-            if login(u,p):
-                st.session_state.user = u
-                st.rerun()
-            else:
-                st.error("Invalid credentials")
+        st.title("Patient Risk Prediction")
 
-    else:
-        st.title("🆕 Signup")
-        u = st.text_input("Create Username")
-        p = st.text_input("Create Password")
+        age=st.slider("Age",18,100,40)
+        bp=st.slider("BP",80,200,120)
+        gl=st.slider("Glucose",50,300,100)
+        ch=st.slider("Cholesterol",100,400,200)
 
-        if st.button("Signup"):
-            if signup(u,p):
-                st.success("Account created! Go to login")
-            else:
-                st.error("User already exists")
+        input_df=pd.DataFrame([[age,bp,gl,ch]],
+            columns=["Age","Systolic_BP","Glucose_Lvl","Cholesterol_Lvl"])
 
-# ---------------- MAIN APP ----------------
-else:
+        prob=best_model.predict_proba(input_df)[0][1]*100
+        level=risk_level(prob)
 
-    # ================= PATIENT PAGE =================
-    if page == "Patient Diagnostic":
+        st.metric("Risk Score",f"{prob:.2f}%")
+        st.success(f"Best Model: {best_name}")
 
-        st.title("🧑‍⚕️ Patient Risk Assessment")
+        if level=="High": st.error(level)
+        elif level=="Medium": st.warning(level)
+        else: st.success(level)
 
-        col1, col2 = st.columns([1,2])
+        st.subheader("Suggestions")
+        for s in suggestions(level):
+            st.write("✔️",s)
 
-        with col1:
-            age = st.slider("Age",18,100,45)
-            bp = st.slider("Systolic BP",90,200,120)
-            glucose = st.slider("Glucose",70,300,110)
-            chol = st.slider("Cholesterol",150,300,200)
+        # ✅ FIXED FEATURE IMPORTANCE
+        st.subheader("Feature Importance")
 
-        # FIXED (DataFrame → no warning)
-        input_df = pd.DataFrame([[age,bp,glucose,chol]],
-            columns=['Age','Systolic_BP','Glucose_Lvl','Cholesterol_Lvl'])
+        features=["Age","Systolic_BP","Glucose_Lvl","Cholesterol_Lvl"]
+        fig,ax=plt.subplots()
 
-        input_scaled = scaler.transform(input_df)
+        if hasattr(best_model,"feature_importances_"):
+            imp=best_model.feature_importances_
 
-        prob = model.predict_proba(input_scaled)[0][1]*100
-        result = "High Risk" if prob>50 else "Low Risk"
+        elif hasattr(best_model,"coef_"):
+            imp=abs(best_model.coef_[0])
 
-        with col2:
-            st.metric("Risk Score", f"{prob:.2f}%")
+        else:
+            imp=None
+            st.info("Not available")
 
-            if prob > 50:
-                st.error("High Risk Detected 🚨")
-            else:
-                st.success("Low Risk ✅")
-
-            fig, ax = plt.subplots()
-            avg = df.groupby("Age")["Risk_Score"].mean()
-            ax.plot(avg.index, avg.values)
-            ax.scatter(age, prob, color="red", s=200)
-            ax.set_title("Your Health vs Population")
+        if imp is not None:
+            imp=imp/np.sum(imp)
+            ax.barh(features,imp)
             st.pyplot(fig)
 
-        # ---------- PATIENT EXPLANATION ----------
-        st.divider()
-        st.subheader("🧠 Easy Explanation")
+        if st.button("Save"):
+            save_hist(st.session_state.user,age,bp,gl,ch,level,prob)
+            st.toast("Saved")
 
-        if prob < 30:
-            st.success("You're in a healthy range. Keep it up!")
-        elif prob < 60:
-            st.warning("Moderate risk. Improving glucose or BP will help.")
-        else:
-            st.error("High risk. Please consult a doctor.")
+    # ======================
+    # MODEL EVAL
+    # ======================
+    elif page=="Model Eval":
 
-        # ---------- SUGGESTIONS ----------
-        st.subheader("💡 Suggestions")
+        st.title("Model Comparison")
+        st.dataframe(df)
+        st.bar_chart(df.set_index("Model"))
 
-        if glucose > 140:
-            st.write("• Reduce sugar intake")
-        if bp > 140:
-            st.write("• Reduce salt & manage stress")
-        if chol > 240:
-            st.write("• Avoid oily foods")
+        # ROC
+        st.subheader("ROC Curve")
+        fig,ax=plt.subplots()
 
-        # ---------- SAVE ----------
-        if st.button("Save to History"):
-            c.execute("""INSERT INTO predictions
-            (username,age,glucose,cholesterol,bp,probability,result)
-            VALUES (?,?,?,?,?,?,?)""",
-            (st.session_state.user,age,glucose,chol,bp,prob,result))
-            conn.commit()
-            st.success("Saved!")
+        for name,(m,Xt,yt,yp,ypb) in outputs.items():
+            fpr,tpr,_=roc_curve(yt,ypb)
+            ax.plot(fpr,tpr,label=name)
 
-    # ================= ANALYTICS =================
-    elif page == "Analytics":
-
-        st.title("📊 Health Analytics Dashboard")
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.metric("Avg Risk Score", f"{df['Risk_Score'].mean():.1f}")
-            st.metric("Avg Glucose", f"{df['Glucose_Lvl'].mean():.1f}")
-
-        with col2:
-            st.metric("Avg BP", f"{df['Systolic_BP'].mean():.1f}")
-            st.metric("Avg Cholesterol", f"{df['Cholesterol_Lvl'].mean():.1f}")
-
-        st.divider()
-
-        st.subheader("🔥 Correlation Heatmap")
-
-        fig, ax = plt.subplots(figsize=(8,5))
-        sns.heatmap(
-            df[['Age','Systolic_BP','Glucose_Lvl','Cholesterol_Lvl','Risk_Score']].corr(),
-            annot=True,
-            cmap="coolwarm",
-            ax=ax
-        )
+        ax.plot([0,1],[0,1],'--')
+        ax.legend()
         st.pyplot(fig)
 
-        st.info("Darker color = stronger impact on risk")
+        # Confusion
+        st.subheader("Confusion Matrix")
+        m,Xt,yt,yp,ypb=outputs[best_name]
 
-        st.divider()
+        cm=confusion_matrix(yt,yp)
+        fig2,ax2=plt.subplots()
+        sns.heatmap(cm,annot=True,fmt='d',ax=ax2)
+        st.pyplot(fig2)
 
-        st.subheader("📈 Glucose vs Risk")
-        st.scatter_chart(df.sample(500), x="Glucose_Lvl", y="Risk_Score")
+        st.text(classification_report(yt,yp))
 
-        st.subheader("📊 Risk vs Age")
-        age_risk = df.groupby("Age")["Risk_Score"].mean()
-        st.line_chart(age_risk)
+    # ======================
+    # EDA
+    # ======================
+    elif page=="EDA":
 
-    # ================= MODEL =================
-    elif page == "Model Transparency":
-
-        st.title("🧠 Model Explanation")
-
-        importance = model.feature_importances_
-        features = ['Age','BP','Glucose','Cholesterol']
-
-        fig, ax = plt.subplots()
-        ax.bar(features, importance)
+        st.title("EDA")
+        fig,ax=plt.subplots()
+        sns.heatmap(data.corr(numeric_only=True),annot=True,ax=ax)
         st.pyplot(fig)
 
-        st.info("Higher bar = more impact on health risk")
+    # ======================
+    # HISTORY
+    # ======================
+    elif page=="History":
 
-    # ================= HISTORY =================
-    elif page == "History":
+        rows=get_all() if st.session_state.role=="Admin" else get_hist(st.session_state.user)
 
-        st.title("📜 Patient History")
+        if rows:
+            dfh=pd.DataFrame(rows,columns=["user","age","bp","glucose","chol","risk","score"])
+            st.dataframe(dfh)
 
-        data = pd.read_sql_query(
-            f"SELECT * FROM predictions WHERE username='{st.session_state.user}'",
-            conn
-        )
+            st.line_chart(dfh["score"])
 
-        if data.empty:
-            st.warning("No history found")
+            st.download_button("Download CSV",dfh.to_csv(index=False),"report.csv")
         else:
-            st.dataframe(data)
+            st.info("No data")
