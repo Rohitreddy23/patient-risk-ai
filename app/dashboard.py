@@ -1,3 +1,5 @@
+import shap
+import google.generativeai as genai
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -6,7 +8,24 @@ import os
 import hashlib
 import matplotlib.pyplot as plt
 import seaborn as sns
+import sys, os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+from voice_helper import speech_to_text, text_to_speech
+from rag_helper import process_pdf, ask_pdf_question
+from genai_helper import generate_medical_report
+from dotenv import load_dotenv
+load_dotenv()
+
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+model = genai.GenerativeModel("gemini-2.5-flash")
+
+from src.utils import get_risk_level, get_suggestions
+from database.db import *
+
+
+from pdf_helper import create_pdf_report
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
 from sklearn.tree import DecisionTreeClassifier
@@ -16,6 +35,7 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 # ======================
 # DB
 # ======================
+create_tables()
 conn = sqlite3.connect("app.db", check_same_thread=False)
 c = conn.cursor()
 
@@ -155,7 +175,8 @@ if st.session_state.user:
 
     st.sidebar.success(f"{st.session_state.user} ({st.session_state.role})")
 
-    menu=["Prediction","Model Eval","EDA","History"] if st.session_state.role=="Admin" else ["Prediction","History"]
+    menu=["Prediction","AI Chatbot","Medical Report Analyzer","Voice Assistant","Model Eval","EDA","History"] if st.session_state.role=="Admin" else ["Prediction","AI Chatbot","Medical Report Analyzer","Voice Assistant","History"]
+
     page=st.sidebar.radio("Menu",menu)
 
     if st.sidebar.button("Logout"):
@@ -170,55 +191,122 @@ if st.session_state.user:
     # PREDICTION
     # ======================
     if page=="Prediction":
-
         st.title("Patient Risk Prediction")
+        
+        age = st.slider("Age", 18, 100, 40)
+        bp = st.slider("BP", 80, 200, 120)
+        gl = st.slider("Glucose", 50, 300, 100)
+        ch = st.slider("Cholesterol", 100, 400, 200)
+        
+        input_df = pd.DataFrame(
+            [[age, bp, gl, ch]],
+            columns=["Age", "Systolic_BP", "Glucose_Lvl", "Cholesterol_Lvl"]
+            )
+        
+        if st.button("Predict Risk"):
+            prob = best_model.predict_proba(input_df)[0][1] * 100
+            level = risk_level(prob)
+            
+            patient_data = {
+                "Pregnancies": 0,
+                "Glucose": gl,
+                "BloodPressure": bp,
+                "BMI": 0,
+                "Age": age
+                }
+            
+            with st.spinner("Generating AI medical report..."):
+                report = generate_medical_report(patient_data, level)
+                
+                st.metric("Risk Score", f"{prob:.2f}%")
+                st.success(f"Best Model: {best_name}")
+                
+                st.subheader("AI Medical Report")
+                st.info(report)
+                
+                pdf_file = "patient_report.pdf"
+                create_pdf_report(
+                    pdf_file,
+                    patient_data, 
+                    prob,
+                    level,
+                    report,
+                    suggestions(level)
+                )
+                
+                with open(pdf_file, "rb") as f:
+                    st.download_button(
+                        "Download AI Report",
+                        f,
+                        file_name="AI_Healthcare_Report.pdf",
+                        mime="application/pdf"
+                    )
+                
+                st.warning(
+                    "This AI-generated report is for educational purposes only and not a medical diagnosis."
+                    )
+                
+                if level == "High":
+                    st.error(level)
+                elif level == "Medium":
+                    st.warning(level)
+                else:
+                    st.success(level)
+                    
+                st.subheader("Suggestions")
+                    
+                for s in suggestions(level):
+                    st.write("✔️", s)
+                    
+                
+        # ======================
+        # FEATURE IMPORTANCE
+        # ======================
 
-        age=st.slider("Age",18,100,40)
-        bp=st.slider("BP",80,200,120)
-        gl=st.slider("Glucose",50,300,100)
-        ch=st.slider("Cholesterol",100,400,200)
+            st.subheader("Feature Importance")
+        
+        # ======================
+        # SHAP EXPLAINABILITY
+        # ======================
 
-        input_df=pd.DataFrame([[age,bp,gl,ch]],
-            columns=["Age","Systolic_BP","Glucose_Lvl","Cholesterol_Lvl"])
+            st.subheader("AI Explainability (SHAP)")
+            try:
+                
+                # Tree-based models
+                if hasattr(best_model, "feature_importances_"):
+                    explainer = shap.TreeExplainer(best_model)
+                    shap_values = explainer.shap_values(input_df)
 
-        prob=best_model.predict_proba(input_df)[0][1]*100
-        level=risk_level(prob)
-
-        st.metric("Risk Score",f"{prob:.2f}%")
-        st.success(f"Best Model: {best_name}")
-
-        if level=="High": st.error(level)
-        elif level=="Medium": st.warning(level)
-        else: st.success(level)
-
-        st.subheader("Suggestions")
-        for s in suggestions(level):
-            st.write("✔️",s)
-
-        # ✅ FIXED FEATURE IMPORTANCE
-        st.subheader("Feature Importance")
-
-        features=["Age","Systolic_BP","Glucose_Lvl","Cholesterol_Lvl"]
-        fig,ax=plt.subplots()
-
-        if hasattr(best_model,"feature_importances_"):
-            imp=best_model.feature_importances_
-
-        elif hasattr(best_model,"coef_"):
-            imp=abs(best_model.coef_[0])
-
-        else:
-            imp=None
-            st.info("Not available")
-
-        if imp is not None:
-            imp=imp/np.sum(imp)
-            ax.barh(features,imp)
-            st.pyplot(fig)
-
-        if st.button("Save"):
-            save_hist(st.session_state.user,age,bp,gl,ch,level,prob)
-            st.toast("Saved")
+                    # Binary classification handling
+                    if isinstance(shap_values, list):
+                        impacts = shap_values[1][0]
+                    else:
+                        impacts = np.array(shap_values)[0]
+                        
+                # Non-tree models
+                else:
+                    explainer = shap.Explainer(best_model.predict, input_df)
+                    shap_values = explainer(input_df)
+                    impacts = shap_values.values[0]
+                    
+                shap_df = pd.DataFrame({
+                    "Feature": input_df.columns,
+                    "Impact": impacts
+                })
+                
+                st.dataframe(shap_df)
+                fig, ax = plt.subplots(figsize=(8,4))
+                
+                ax.barh(
+                    shap_df["Feature"],
+                    shap_df["Impact"]
+                )
+                
+                ax.set_xlabel("SHAP Impact")
+                st.pyplot(fig)
+                
+            except Exception as e:
+                st.warning(f"SHAP explanation unavailable: {e}")
 
     # ======================
     # MODEL EVAL
@@ -261,10 +349,143 @@ if st.session_state.user:
         fig,ax=plt.subplots()
         sns.heatmap(data.corr(numeric_only=True),annot=True,ax=ax)
         st.pyplot(fig)
+        
+    # ======================
+    # AI CHATBOT
+    # ======================
+    elif page == "AI Chatbot":
+        
+        st.title("AI Medical Assistant")
+        
+        # Initialize chat history
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
+            
+        # Display previous messages
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+        
+        # User input
+        user_question = st.chat_input("Ask your health question")
+            
+        if user_question:
+            
+            # Store user message
+            st.session_state.messages.append({
+                "role": "user",
+                "content": user_question
+            })
+            
+            # Display user message
+            with st.chat_message("user"):
+                st.markdown(user_question)
+                
+            # Generate AI response
+            with st.chat_message("assistant"):
+                
+                with st.spinner("Thinking..."):
+                    conversation = ""
+                    
+                    for msg in st.session_state.messages:
+                        conversation += f"{msg['role']}: {msg['content']}\n"
+                    
+                    prompt = f"""
+                    You are a professional medical AI assistant.
+                    Continue the conversation naturally.
+                    Conversation History:
+                    {conversation}
+                    Give educational medical guidance only.
+                    """
+                    
+                    response = model.generate_content(prompt)
+                    ai_response = response.text
+                    
+                    st.markdown(ai_response)
 
+            # Save AI response
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": ai_response
+                })
+
+            st.warning(
+                "This AI response is for educational purposes only and not medical advice."
+                )
+
+    # ======================
+    # VOICE ASSISTANT
+    # ======================
+
+    elif page == "Voice Assistant":
+        st.title("AI Voice Medical Assistant")
+        
+        if st.button("🎤 Speak"):
+            with st.spinner("Listening..."):
+                text = speech_to_text()
+
+            if text:
+                st.success(f"You said: {text}")
+
+                prompt = f"""
+                You are a helpful medical AI assistant.
+
+                Answer this health question professionally:
+
+                {text}
+                """
+
+                response = model.generate_content(prompt)
+
+                ai_response = response.text
+
+                st.info(ai_response)
+
+                audio_file = text_to_speech(ai_response)
+
+                audio_bytes = open(audio_file, "rb").read()
+
+                st.audio(audio_bytes, format="audio/mp3")
+
+            else:
+                st.error("Could not recognize speech")
+            
     # ======================
     # HISTORY
     # ======================
+    elif page == "Medical Report Analyzer":
+        st.title("AI Medical Report Analyzer")
+        
+        uploaded_file = st.file_uploader(
+            "Upload Medical PDF",
+            type=["pdf"]
+            )
+        
+        if uploaded_file:
+            
+            with st.spinner("Processing PDF..."):
+                vector_store = process_pdf(uploaded_file)
+                
+            question = st.text_input(
+                "Ask question about the report"
+            )
+            
+            if question:
+                with st.spinner("Analyzing report..."):
+                    
+                    answer = ask_pdf_question(
+                        vector_store,
+                        question
+                    )
+                    
+                st.subheader("AI Analysis")
+                st.info(answer)
+                
+                st.warning(
+                    "AI analysis is for educational purposes only."
+                    )
+    
+    
     elif page=="History":
 
         rows=get_all() if st.session_state.role=="Admin" else get_hist(st.session_state.user)
@@ -278,3 +499,6 @@ if st.session_state.user:
             st.download_button("Download CSV",dfh.to_csv(index=False),"report.csv")
         else:
             st.info("No data")
+            
+    
+    
