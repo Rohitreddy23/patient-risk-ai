@@ -11,9 +11,9 @@ shap
 google-generativeai
 python-dotenv
 
-langchain
-langchain-community
-langchain-google-genai
+langchain==0.2.16
+langchain-community==0.2.16
+langchain-google-genai==1.0.10
 langchain-text-splitters
 
 faiss-cpu
