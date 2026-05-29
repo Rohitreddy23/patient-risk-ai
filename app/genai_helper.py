@@ -34,13 +34,3 @@ def generate_medical_report(data, risk):
     response = model.generate_content(prompt)
 
     return response.text
-
-sample_data = {
-    "Pregnancies": 2,
-    "Glucose": 180,
-    "BloodPressure": 90,
-    "BMI": 35,
-    "Age": 45
-}
-
-print(generate_medical_report(sample_data, "High Risk"))
