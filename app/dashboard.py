@@ -12,7 +12,7 @@ import sys, os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from voice_helper import speech_to_text, text_to_speech
-from rag_helper import process_pdf, ask_pdf_question
+# from rag_helper import process_pdf, ask_pdf_question
 from genai_helper import generate_medical_report
 from dotenv import load_dotenv
 load_dotenv()
@@ -175,7 +175,7 @@ if st.session_state.user:
 
     st.sidebar.success(f"{st.session_state.user} ({st.session_state.role})")
 
-    menu=["Prediction","AI Chatbot","Medical Report Analyzer","Voice Assistant","Model Eval","EDA","History"] if st.session_state.role=="Admin" else ["Prediction","AI Chatbot","Medical Report Analyzer","Voice Assistant","History"]
+    menu=["Prediction","AI Chatbot","Voice Assistant","Model Eval","EDA","History"] if st.session_state.role=="Admin" else ["Prediction","AI Chatbot","Voice Assistant","History"]
 
     page=st.sidebar.radio("Menu",menu)
 
@@ -206,6 +206,16 @@ if st.session_state.user:
         if st.button("Predict Risk"):
             prob = best_model.predict_proba(input_df)[0][1] * 100
             level = risk_level(prob)
+            
+            save_hist(
+                st.session_state.user,
+                age,
+                bp,
+                gl,
+                ch,
+                level,
+                prob
+            )
             
             patient_data = {
                 "Pregnancies": 0,
@@ -453,37 +463,36 @@ if st.session_state.user:
     # ======================
     # HISTORY
     # ======================
-    elif page == "Medical Report Analyzer":
-        st.title("AI Medical Report Analyzer")
-        
-        uploaded_file = st.file_uploader(
-            "Upload Medical PDF",
-            type=["pdf"]
-            )
-        
-        if uploaded_file:
-            
-            with st.spinner("Processing PDF..."):
-                vector_store = process_pdf(uploaded_file)
-                
-            question = st.text_input(
-                "Ask question about the report"
-            )
-            
-            if question:
-                with st.spinner("Analyzing report..."):
+    #elif page == "Medical Report Analyzer":
+     #   st.title("AI Medical Report Analyzer")  
+      #  uploaded_file = st.file_uploader(
+       #     "Upload Medical PDF",
+        #    type=["pdf"]
+         #   )
+        #
+        #if uploaded_file:
+         #   
+          #  with st.spinner("Processing PDF..."):
+           #     vector_store = process_pdf(uploaded_file)
+            #    
+            #question = st.text_input(
+             #   "Ask question about the report"
+            #)
+            #
+            #if question:
+             #   with st.spinner("Analyzing report..."):
+              #      
+               #     answer = ask_pdf_question(
+                #        vector_store,
+                 #       question
+                  #  )
                     
-                    answer = ask_pdf_question(
-                        vector_store,
-                        question
-                    )
-                    
-                st.subheader("AI Analysis")
-                st.info(answer)
+                #st.subheader("AI Analysis")
+                #st.info(answer)
                 
-                st.warning(
-                    "AI analysis is for educational purposes only."
-                    )
+                #st.warning(
+                 #   "AI analysis is for educational purposes only."
+                  #  )
     
     
     elif page=="History":
