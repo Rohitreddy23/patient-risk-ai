@@ -24,3 +24,5 @@ reportlab
 
 gTTS
 SpeechRecognition
+
+protobuf<5
