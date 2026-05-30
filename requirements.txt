@@ -24,5 +24,6 @@ reportlab
 
 gTTS
 SpeechRecognition
+PyAudio
 
 protobuf<5
