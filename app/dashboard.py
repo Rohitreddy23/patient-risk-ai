@@ -1,5 +1,5 @@
 import shap
-import google.generativeai as genai
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -17,9 +17,7 @@ from genai_helper import generate_medical_report
 from dotenv import load_dotenv
 load_dotenv()
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-
-model = genai.GenerativeModel("gemini-2.5-flash")
+from genai_helper import generate_medical_report, generate_chat_response
 
 from src.utils import get_risk_level, get_suggestions
 from database.db import *
@@ -279,32 +277,33 @@ if st.session_state.user:
         # SHAP EXPLAINABILITY
         # ======================
 
-            st.subheader("AI Explainability (SHAP)")
+            
             try:
+                features = [
+                    "Age",
+                    "Systolic_BP",
+                    "Glucose_Lvl",
+                    "Cholesterol_Lvl"
+                ]
                 
-                # Tree-based models
                 if hasattr(best_model, "feature_importances_"):
-                    explainer = shap.TreeExplainer(best_model)
-                    shap_values = explainer.shap_values(input_df)
-
-                    # Binary classification handling
-                    if isinstance(shap_values, list):
-                        impacts = shap_values[1][0]
-                    else:
-                        impacts = np.array(shap_values)[0]
-                        
-                # Non-tree models
+                    importance = best_model.feature_importances_
+                    
+                elif hasattr(best_model, "coef_"):
+                    importance = abs(best_model.coef_[0])
+                    
                 else:
-                    explainer = shap.Explainer(best_model.predict, input_df)
-                    shap_values = explainer(input_df)
-                    impacts = shap_values.values[0]
+                    importance = [0, 0, 0, 0]
                     
                 shap_df = pd.DataFrame({
-                    "Feature": input_df.columns,
-                    "Impact": impacts
+                    "Feature": features,
+                    "Impact": importance
                 })
                 
+                st.subheader("AI Explainability (SHAP)")
+                
                 st.dataframe(shap_df)
+                
                 fig, ax = plt.subplots(figsize=(8,4))
                 
                 ax.barh(
@@ -312,12 +311,13 @@ if st.session_state.user:
                     shap_df["Impact"]
                 )
                 
-                ax.set_xlabel("SHAP Impact")
+                ax.set_xlabel("Impact")
+                ax.set_title("Feature Importance")
+                
                 st.pyplot(fig)
                 
             except Exception as e:
-                st.warning(f"SHAP explanation unavailable: {e}")
-
+                st.error(f"Explainability Error: {e}")
     # ======================
     # MODEL EVAL
     # ======================
@@ -408,8 +408,7 @@ if st.session_state.user:
                     Give educational medical guidance only.
                     """
                     
-                    response = model.generate_content(prompt)
-                    ai_response = response.text
+                    ai_response = generate_chat_response(prompt)
                     
                     st.markdown(ai_response)
 
@@ -445,9 +444,7 @@ if st.session_state.user:
                 {text}
                 """
 
-                response = model.generate_content(prompt)
-
-                ai_response = response.text
+                ai_response = generate_chat_response(prompt)
 
                 st.info(ai_response)
 

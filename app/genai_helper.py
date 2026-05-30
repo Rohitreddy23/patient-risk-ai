@@ -1,14 +1,36 @@
-from dotenv import load_dotenv
 import os
-import google.generativeai as genai
+import requests
+from dotenv import load_dotenv
 
 load_dotenv()
 
-api_key = os.getenv("GEMINI_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-genai.configure(api_key=api_key)
 
-model = genai.GenerativeModel("gemini-2.5-flash")
+def generate_chat_response(prompt):
+
+    response = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "model": "deepseek/deepseek-chat",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+        },
+        timeout=60
+    )
+
+    response.raise_for_status()
+
+    return response.json()["choices"][0]["message"]["content"]
+
 
 def generate_medical_report(data, risk):
 
@@ -31,6 +53,4 @@ def generate_medical_report(data, risk):
     Keep response simple and professional.
     """
 
-    response = model.generate_content(prompt)
-
-    return response.text
+    return generate_chat_response(prompt)
